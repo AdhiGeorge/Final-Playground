@@ -1,5 +1,5 @@
 import logging
-import logging.handlers
+from typing import Optional
 from pathlib import Path
 from utils.config import config
 
@@ -11,44 +11,31 @@ class Logger:
             cls._instance = super(Logger, cls).__new__(cls)
             cls._instance._initialize_logger()
         return cls._instance
-
+    
     def _initialize_logger(self):
-        """Initialize the logger with configuration."""
-        logging_config = config.get('logging')
+        self.logger = logging.getLogger(__name__)
+        logging_config = config.settings.logging
         
-        # Create logs directory if it doesn't exist
-        log_dir = Path(logging_config.get('file', 'logs/search_system.log')).parent
-        log_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Create logger
-        self.logger = logging.getLogger('search_system')
-        self.logger.setLevel(logging_config.get('level', 'INFO'))
+        # Set log level
+        self.logger.setLevel(logging_config.level)
         
         # Create formatter
-        formatter = logging.Formatter(logging_config.get('format', '%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+        formatter = logging.Formatter(logging_config.format)
         
-        # Create file handler with rotation
-        file_handler = logging.handlers.RotatingFileHandler(
-            logging_config.get('file', 'logs/search_system.log'),
-            maxBytes=logging_config.get('max_bytes', 10485760),
-            backupCount=logging_config.get('backup_count', 5)
-        )
-        file_handler.setFormatter(formatter)
-        
-        # Create console handler
+        # Console handler
         console_handler = logging.StreamHandler()
         console_handler.setFormatter(formatter)
-        
-        # Add handlers to logger
-        self.logger.addHandler(file_handler)
         self.logger.addHandler(console_handler)
         
-        # Prevent duplicate logs
-        self.logger.propagate = False
-
+        # File handler if specified
+        if logging_config.file:
+            file_path = Path(logging_config.file)
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_handler = logging.FileHandler(file_path)
+            file_handler.setFormatter(formatter)
+            self.logger.addHandler(file_handler)
+    
     def get_logger(self):
-        """Get the configured logger instance."""
         return self.logger
 
-# Create singleton instance
 logger = Logger().get_logger()

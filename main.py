@@ -1,61 +1,47 @@
-from web_search.searcher import WebSearcher
-from web_scraper.scraper_manager import ScraperManager
-from utils.config import config
+import asyncio
+from pathlib import Path
+import logging
 from utils.logger import logger
-import json
+from web_scraper.components.main_scraper import WebScraper
 
-def main():
-    # Initialize components
-    search_manager = WebSearcher()
-    scraper_manager = ScraperManager()
-    
-    print("\nEnter your search query (or type 'exit' to quit):")
+from web_search.searcher import WebSearcher
+
+async def main():
+    """Main application loop"""
+    scraper = WebScraper()
+    web_searcher = WebSearcher()
     
     while True:
-        query = input("\n> ").strip()
-        
-        if query.lower() == 'exit':
-            print("\nGoodbye!")
-            break
-        
-        if not query:
-            print("Please enter a valid search query.")
-            continue
-            
         try:
-            # Search
+            query = input("\nEnter your search query (or type 'exit' to quit):\n\n> ")
+            
+            if query.lower() == 'exit':
+                print("\nGoodbye!\n")
+                break
+                
             print(f"\nSearching for: {query}")
-            search_results = search_manager.search(query)
+            logger.info(f"Starting search for query: {query}")
             
-            # Display results
-            print("\nSearch Results:")
-            for i, result in enumerate(search_results[:2], 1):
-                print(f"\nResult {i}:")
-                if isinstance(result, dict):
-                    print(f"Title: {result.get('title', 'No title')}")
-                    print(f"URL: {result.get('url', 'No URL')}")
-                    print(f"Description: {result.get('description', 'No description')}")
-                else:
-                    print(f"URL: {result}")
+            # Set query and initialize storage
+            await scraper.set_query(query)
             
-            # Extract URLs for scraping
-            urls = []
-            for result in search_results[:2]:
-                if isinstance(result, dict):
-                    urls.append(result.get('url', ''))
-                else:
-                    urls.append(result)
+            # Get real search results
+            search_results = await web_searcher.search(query)
+            if not search_results:
+                print("\nNo search results found. Try a different query.")
+                continue
             
-            # Scrape
-            print("\nStarting to scrape results...")
-            scraper_manager.scrape(urls, mode='standard', query=query)
+            # Scrape results
+            scrape_results = await scraper.scrape(search_results)
             
-            print("\nScraping completed!")
-            print("Results have been saved to the appropriate directories.")
+            # Display summary
+            success_count = sum(1 for r in scrape_results if r.get("success"))
+            print(f"\nScraping completed! Successfully scraped {success_count}/{len(search_results)} URLs.")
             
         except Exception as e:
-            logger.error(f"An error occurred: {str(e)}")
-            print(f"\nAn error occurred: {str(e)}")
+            logger.error(f"Error in main loop: {e}")
+            print(f"\nAn error occurred: {e}")
+            continue
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

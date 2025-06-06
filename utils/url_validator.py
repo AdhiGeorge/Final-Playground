@@ -8,12 +8,12 @@ from utils.logger import logger
 class URLValidator:
     def __init__(self):
         """Initialize URL validator with configuration."""
-        self.allowed_domains = config.url_validation_config.get('allowed_domains', [])
-        self.blocked_domains = config.url_validation_config.get('blocked_domains', [])
-        self.blocked_extensions = config.url_validation_config.get('blocked_extensions', [])
-        self.max_content_size = config.url_validation_config.get('max_content_size', 10485760)
-        self.allow_video_urls = config.url_validation_config.get('allow_video_urls', False)
-        self.allow_auth_required = config.url_validation_config.get('allow_auth_required', False)
+        self.allowed_domains = config.url_validation_config.allowed_domains
+        self.blocked_domains = config.url_validation_config.blocked_domains
+        self.blocked_extensions = config.url_validation_config.blocked_extensions
+        self.max_content_size = config.url_validation_config.max_content_size
+        self.allow_video_urls = config.url_validation_config.allow_video_urls
+        self.allow_auth_required = config.url_validation_config.allow_auth_required
         self.logger = logging.getLogger('search_system')
         logger.info("URLValidator initialized with configuration")
 

@@ -2,24 +2,28 @@
 langchain>=0.1.0
 python-dotenv>=1.0.0
 requests>=2.31.0
-beautifulsoup4>=4.12.2
+beautifulsoup4==4.12.3
 pyyaml>=6.0.1
 tenacity>=8.2.3
-aiohttp>=3.9.1
-python-duckduckgo>=0.1.0
+aiohttp==3.9.1
 scikit-learn>=1.3.0
 python-json-logger>=2.0.7
 jsonschema>=4.19.0
 filelock>=3.13.1
+pybreaker==1.0.0
+pydantic==2.5.3
 
 # Web Scraping Dependencies
-playwright>=1.40.0
-pillow>=10.1.0
-aiofiles>=23.2.1
+playwright==1.40.0
+pillow==10.1.0
+aiofiles==23.2.1
+pytesseract==0.3.10
+python-magic==0.4.27
+pdf2image==1.16.3
 
 # Search Engine Dependencies
-python-duckduckgo>=0.1.0
-tavily-search-api>=0.1.0
+duckduckgo-search>=6.1.7
+tavily-python>=0.5.0
 
 # Utility Dependencies
 pathlib2>=2.3.7
@@ -41,3 +45,6 @@ black>=23.11.0
 isort>=5.12.0
 mypy>=1.6.1
 numpy>=1.24.0
+
+# Playwright browsers
+playwright install chromium

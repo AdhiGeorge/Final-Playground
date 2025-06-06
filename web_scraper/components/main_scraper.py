@@ -1,199 +1,316 @@
 from pathlib import Path
 from urllib.parse import urljoin
 from typing import List, Dict, Optional, Any
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 from datetime import datetime
 import json
 import re
 from bs4 import BeautifulSoup
-from web_scraper.components.base_scraper import BaseScraper
-from web_scraper.components.pdf_scraper import PDFScraper
-from web_scraper.components.image_scraper import ImageScraper
+from web_scraper.components.base_scraper import BaseScraper 
 from utils.config import config
 from utils.logger import logger
 from utils.results_storage import ResultsStorage
 import random
 import time
-import json
+import asyncio
+import aiofiles
+import aiohttp
+import pytesseract
+from PIL import Image
+import io
 
 class WebScraper(BaseScraper):
     def __init__(self):
-        super().__init__()
-        self.setup_directories()
-        self.pdf_scraper = PDFScraper()
-        self.image_scraper = ImageScraper()
-        self.max_concurrent = config.get('scraping.max_concurrent', 5)
-        self.rate_limit = config.get('scraping.rate_limit', {})
-        self.query = None  # Will be set when scraping starts
+        self.query = None
         self.results_storage = None
-        logger.info("WebScraper initialized with configuration")
+        self.max_concurrent = config.settings.scraping.max_concurrent
+        self.rate_limit_config = config.settings.scraping.rate_limit
+        self.user_agents = config.settings.scraping.user_agents
+        self.timeout = config.settings.scraping.timeout
+        logger.info("WebScraper initialized.")
 
-    def set_query(self, query: str):
-        """Set the query for this scraping session."""
+    async def set_query(self, query: str):
+        """Set the current query and initialize storage"""
+        logger.info(f"Setting query: {query}")
         self.query = query
-        if self.results_storage is None:
-            self.results_storage = ResultsStorage(query=query, type_='scrape')
+        base_dir = Path(config.settings.directories.base) / self._sanitize_query(query)
+        self.results_storage = ResultsStorage(base_dir, query)
+        await self.results_storage.initialize()
+        logger.info(f"Storage initialized for query: {query}")
 
-    def scrape(self, urls: List[str], mode: str = 'standard'):
-        """Scrape multiple URLs with specified mode."""
-        if not self.query:
-            raise ValueError("Query must be set before scraping")
-            
-        if not urls:
-            logger.error("No URLs provided for scraping")
-            return
-            
-        # Set mode-specific scraping behavior
-        scraping_config = config.get('scraping.modes', {}).get(mode, {})
-        
-        # Process URLs sequentially
-        for url in urls:
-            self.scrape_url(url, scraping_config)
-        
-        logger.info(f"Scraping completed for {len(urls)} URLs")
+    def _sanitize_query(self, query: str) -> str:
+        """Convert query to safe directory name"""
+        return "".join(c if c.isalnum() else "_" for c in query)
 
-    def scrape_url(self, url: str, config: dict) -> None:
-        """Scrape a single URL."""
+    async def scrape(self, urls: List[str]) -> List[Dict]:
+        """Scrape a list of URLs with full feature support"""
+        if not self.query or not self.results_storage:
+            raise ValueError("Query and ResultsStorage must be set before scraping")
+            
+        # Ensure storage is ready
+        if not await self.results_storage.is_ready():
+            raise RuntimeError("Results storage is not ready")
+        
+        results = []
+        
+        # Scrape first N URLs fully based on config
+        top_n = min(config.settings.search.scrape_top_n, len(urls))
+        
         try:
-            with sync_playwright() as playwright:
-                browser = playwright.chromium.launch(headless=True)
-                context = browser.new_context(
-                    user_agent=random.choice(self.user_agents)
-                )
-                page = context.new_page()
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch()
+                context = await browser.new_context()
                 
-                # Navigate and wait for load
-                page.goto(url, wait_until='networkidle')
+                for i, url in enumerate(urls):
+                    try:
+                        result = {"url": url, "success": False}
+                        
+                        # Basic scraping for all URLs
+                        page = await context.new_page()
+                        timeout_seconds = self.timeout / 1000
+                        response = await page.goto(url, timeout=timeout_seconds * 1000)
+                        
+                        if response.status >= 400:
+                            result["error"] = f"HTTP {response.status}"
+                            results.append(result)
+                            continue
+                        
+                        content_type = response.headers.get("content-type", "")
+                        
+                        # Handle PDFs
+                        if "pdf" in content_type.lower() and config.settings.scraping.save_pdfs:
+                            pdf_content = await response.body()
+                            await self.results_storage.save_scraped_content(
+                                url, "pdf", pdf_content, {"content_type": "pdf"}
+                            )
+                            result["pdf_saved"] = True
+                        
+                        # Full scraping for top N URLs
+                        if i < top_n:
+                            html = await page.content()
+                            
+                            # Save HTML
+                            if config.settings.scraping.save_html:
+                                await self.results_storage.save_scraped_content(
+                                    url, "html", html, {"content_type": "html"}
+                                )
+                            
+                            # Extract and save text
+                            if config.settings.scraping.save_text:
+                                soup = BeautifulSoup(html, "html.parser")
+                                text = soup.get_text(" ", strip=True)
+                                await self.results_storage.save_scraped_content(
+                                    url, "text", text, {"content_type": "text"}
+                                )
+                            
+                            # Capture screenshots of formulas
+                            if config.settings.scraping.capture_formulas:
+                                math_elements = await page.query_selector_all("math, .math, .equation")
+                                for j, element in enumerate(math_elements):
+                                    screenshot = await element.screenshot(
+                                        type="png",
+                                        quality=config.settings.scraping.formula_screenshot_quality
+                                    )
+                                    await self.results_storage.save_scraped_content(
+                                        url, "formula", screenshot, 
+                                        {"formula_index": j, "content_type": "formula"}
+                                    )
+                            
+                            # Save images
+                            if config.settings.scraping.save_images:
+                                images = await page.query_selector_all("img")
+                                for img in images:
+                                    try:
+                                        src = await img.get_attribute("src")
+                                        if src and src.startswith(('http', 'https')):
+                                            async with aiohttp.ClientSession() as session:
+                                                async with session.get(src) as resp:
+                                                    img_data = await resp.read()
+                                                    await self.results_storage.save_scraped_content(
+                                                        url, "image", img_data,
+                                                        {"src": src, "content_type": resp.content_type}
+                                                    )
+                                    except Exception as e:
+                                        logger.error(f"Failed to save image from {url}: {e}")
+                        
+                        result["success"] = True
+                        results.append(result)
+                        
+                    except Exception as e:
+                        logger.error(f"Failed to scrape {url}: {e}")
+                        results.append({"url": url, "error": str(e), "success": False})
+                    finally:
+                        await page.close()
                 
-                # Get page content
-                content = page.content()
-                
-                # Extract content
-                extracted = self.extract_content(url, content)
-                
-                # Save results
-                if extracted:
-                    self.results_storage.save_metadata(url, extracted)
-                    
-                # Close browser
-                browser.close()
-                
+                await context.close()
+                await browser.close()
         except Exception as e:
-            logger.error(f"Error scraping {url}: {str(e)}")
-            return {'url': url, 'error': str(e)}
+            logger.error(f"Error in scrape: {e}")
+            raise
+        
+        return results
 
-    def extract_content(self, url: str, content: str) -> Dict:
-        """Extract content from the page."""
+    async def extract_content(self, url: str, html_content: str) -> Dict:  
         try:
-            soup = BeautifulSoup(content, 'html.parser')
+            soup = BeautifulSoup(html_content, 'html.parser')
+            title = soup.title.string.strip() if soup.title and soup.title.string else 'No title found'
+            description = self._extract_description(soup)
             
-            # Extract basic page content
-            title = soup.title.string if soup.title else "No title"
-            description = self.extract_description(soup)
-            
-            # Extract links
-            links = self.extract_links(soup, url)
-            
-            # Extract images
-            images = self.image_scraper.extract_images(soup, url)
-            
-            # Extract PDFs
-            pdfs = self.pdf_scraper.extract_pdfs(soup, url)
-            
+            links = self._extract_links(soup, url)
+            images = [] 
+            pdfs = []   
+
             return {
-                'url': url,
                 'title': title,
                 'description': description,
                 'links': links,
                 'images': images,
                 'pdfs': pdfs,
-                'timestamp': datetime.now().isoformat()
             }
         except Exception as e:
-            logger.error(f"Error extracting content from {url}: {str(e)}")
-            return {'url': url, 'error': str(e)}
+            logger.error(f"Error extracting content for {url}: {e}", exc_info=True)
+            return {'error': f'Failed to extract content: {e}'}
 
-    def setup_directories(self):
-        """Create necessary directories for storing scraped data."""
-        base_dir = Path(self.config.get('directories.base', 'Data'))
-        scrape_dir = base_dir / self.config.get('directories.scrape.base', 'Scraped_Results')
-        scrape_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Create subdirectories
-        subdirs = self.config.get('directories.scrape', {})
-        for subdir in subdirs.values():
-            if subdir != 'base':
-                (scrape_dir / subdir).mkdir(parents=True, exist_ok=True)
-        
-        logger.info(f"Created scraping directory structure at: {scrape_dir}")
-
-    async def wait_for_rate_limit(self):
-        """Wait according to rate limiting configuration."""
-        delay = self.rate_limit.get('delay_between_requests', 1)
-        await asyncio.sleep(delay)
-
-    async def scrape_urls(self, urls: List[str], mode: str = 'standard'):
-        """Scrape multiple URLs concurrently."""
-        tasks = []
-        for url in urls:
-            tasks.append(self.scrape_url(url, mode))
-            await self.wait_for_rate_limit()
-            
-            # Limit concurrent tasks
-            if len(tasks) >= self.max_concurrent:
-                await asyncio.gather(*tasks)
-                tasks = []
-        
-        # Process remaining tasks
-        if tasks:
-            await asyncio.gather(*tasks)
-
-    def scrape(self, urls: List[str], mode: str = 'standard'):
-        """Main method to start scraping."""
-        try:
-            asyncio.run(self.scrape_urls(urls, mode))
-        except Exception as e:
-            logger.error(f"Failed to scrape: {str(e)}")
-            raise
-            return {'error': str(e)}
-
-    def save_html(self, url: str, content: str) -> Path:
-        """Save HTML content to file."""
-        html_dir = Path(self.config['download_directory']) / self.config['subdirectories']['html']
-        filename = f"{self.get_safe_filename(url)}.html"
-        filepath = html_dir / filename
-        
-        with open(filepath, 'w', encoding='utf-8') as f:
-            f.write(content)
-        return filepath
-        
-    def save_metadata(self, url: str, data: Dict) -> str:
-        """Save metadata using ResultsStorage."""
-        return self.results_storage.save_scrape_results(url, data['html_file'], data)
-        
-    def extract_description(self, soup: BeautifulSoup) -> str:
-        """Extract page description."""
+    def _extract_description(self, soup: BeautifulSoup) -> str:
         meta_desc = soup.find('meta', attrs={'name': 'description'})
-        if meta_desc and 'content' in meta_desc.attrs:
-            return meta_desc['content']
-        return ''
+        if meta_desc and meta_desc.get('content'):
+            return meta_desc['content'].strip()
         
-    async def scrape_urls(self, urls: List[str], mode: str = 'standard'):
-        """Scrape multiple URLs concurrently."""
-        tasks = []
-        for url in urls:
-            tasks.append(self.scrape_url(url, mode))
-            await self.wait_for_rate_limit()
-            
-            # Limit concurrent tasks
-            if len(tasks) >= self.max_concurrent:
-                await asyncio.gather(*tasks)
-                tasks = []
+        meta_og_desc = soup.find('meta', property='og:description')
+        if meta_og_desc and meta_og_desc.get('content'):
+            return meta_og_desc['content'].strip()
         
-        # Process remaining tasks
-        if tasks:
-            await asyncio.gather(*tasks)
+        first_p = soup.find('p')
+        if first_p and first_p.get_text():
+            text = first_p.get_text().strip()
+            if 50 < len(text) < 300: 
+                return text
+        return 'No description found'
 
-    def scrape(self, urls: List[str], mode: str = 'standard'):
-        """Main method to start scraping."""
-        asyncio.run(self.scrape_urls(urls, mode))
+    def _extract_links(self, soup: BeautifulSoup, base_url: str) -> List[str]:
+        links = set()
+        for a_tag in soup.find_all('a', href=True):
+            href = a_tag['href']
+            if href and not href.startswith('#') and not href.startswith('javascript:'):
+                full_url = urljoin(base_url, href)
+                links.add(full_url)
+        return list(links)
+
+    async def _wait_for_rate_limit(self):
+        delay = self.rate_limit_config.delay_between_requests
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+    async def scrape_with_full_features(self, urls: List[str]) -> List[Dict]:
+        """Scrape a list of URLs."""
+        if not self.results_storage:
+            raise ValueError("ResultsStorage not initialized")
+            
+        # Ensure directories are ready
+        await self.results_storage._ensure_directories_ready()
+        
+        if not await self.results_storage.is_ready():
+            raise RuntimeError("Failed to initialize storage directories")
+
+        if not self.query:
+            logger.error("Query not set. Call set_query() first.")
+            raise ValueError("Query must be set via set_query() before scraping.")
+
+        if not urls:
+            logger.warning("No URLs provided for scraping.")
+            return []
+
+        scraping_mode_settings = getattr(config.settings.scraping.modes, 'standard', None)
+        if scraping_mode_settings is None:
+            logger.warning(f"Invalid scraping mode 'standard'. Falling back to default settings.")
+            scraping_mode_settings = config.settings.scraping.modes
+        
+        scraping_params = scraping_mode_settings
+        
+        tasks = []
+        scraped_results_aggregate: List[Dict] = []
+
+        logger.info(f"Starting scrape for {len(urls)} URLs with mode 'standard' for query: '{self.query}'.")
+
+        semaphore = asyncio.Semaphore(self.max_concurrent)
+
+        for url_to_scrape in urls:
+            task = asyncio.create_task(self._scrape_url_with_semaphore(semaphore, url_to_scrape, scraping_params))
+            tasks.append(task)
+        
+        results_batch = await asyncio.gather(*tasks, return_exceptions=True)
+        scraped_results_aggregate.extend(self._process_batch_results(results_batch, urls))
+        
+        successful_scrapes = sum(1 for r in scraped_results_aggregate if not r.get('error'))
+        logger.info(f"Scraping completed for query: '{self.query}'. Successfully scraped: {successful_scrapes}, Failed: {len(scraped_results_aggregate) - successful_scrapes} out of {len(urls)} URLs.")
+        return scraped_results_aggregate
+
+    def _process_batch_results(self, results_batch: List[Any], original_urls: List[str]) -> List[Dict]:
+        processed = []
+        for i, res in enumerate(results_batch):
+            if isinstance(res, Exception):
+                logger.error(f"Exception during scraping URL {original_urls[i]}: {res}", exc_info=True)
+                processed.append({'url': original_urls[i], 'error': str(res)})
+            elif res is None: 
+                logger.error(f"Scraping returned None for URL {original_urls[i]}")
+                processed.append({'url': original_urls[i], 'error': 'Scraping returned None'})
+            else:
+                processed.append(res)
+        return processed
+
+    async def _scrape_url_with_semaphore(self, semaphore: asyncio.Semaphore, url: str, scraping_params: Dict) -> Dict:
+        async with semaphore:
+            await self._wait_for_rate_limit()
+            return await self.scrape_url(url, scraping_params)
+
+    async def scrape_url(self, url: str, scraping_params: Dict) -> Dict:
+        if url.lower().endswith('.pdf'):
+            logger.warning(f"Skipping PDF scraping for {url}")
+            return {'url': url, 'error': 'PDF scraping not supported'}
+            
+        if not self.query or not self.results_storage:
+            logger.error("ResultsStorage not available in scrape_url. This indicates a programming error.")
+            return {'url': url, 'error': 'ResultsStorage not initialized'}
+
+        try:
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(headless=True)
+                context = await browser.new_context(user_agent=random.choice(self.user_agents))
+                page = await context.new_page()
+                
+                try:
+                    timeout_seconds = self.timeout / 1000
+                    logger.info(f"Navigating to {url} with timeout {timeout_seconds}s")
+                    await page.goto(url, timeout=timeout_seconds * 1000)  # Playwright uses ms
+                    
+                    html_content = await page.content()
+                    
+                    # Save HTML content
+                    save_result = await self.results_storage.save_scraped_content(url, "html", html_content)
+                    if not save_result:
+                        return {'url': url, 'error': 'Failed to save HTML content'}
+                    
+                    extracted_data = await self.extract_content(url, html_content)
+                    
+                    metadata = {
+                        'url': url,
+                        'query': self.query,
+                        'timestamp': datetime.now().isoformat(),
+                        'scraping_mode_params': scraping_params,
+                        'html_file_path': str(save_result),
+                        **extracted_data
+                    }
+                    
+                    await self.results_storage.save_scrape_metadata(url, metadata)
+                    
+                    return {
+                        'url': url,
+                        'status': 'success',
+                        'html_file': str(save_result),
+                        **extracted_data
+                    }
+                finally:
+                    await browser.close()
+        except Exception as e:
+            logger.error(f"Error scraping {url}: {str(e)}")
+            return {'url': url, 'error': str(e)}

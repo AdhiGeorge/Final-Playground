@@ -1,7 +1,6 @@
 from typing import List, Dict, Optional
 import aiohttp
 import aiofiles
-import os
 from pathlib import Path
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
@@ -12,11 +11,10 @@ from utils.logger import logger
 class PDFScraper(BaseScraper):
     def __init__(self):
         super().__init__()
-        base_dir = Path(config.get('directories.base', 'Data'))
-        scrape_dir = base_dir / config.get('directories.scrape.base', 'Scraped_Results')
-        self.pdf_dir = scrape_dir / config.get('directories.scrape.pdfs', 'pdfs')
-        self.pdf_dir.mkdir(parents=True, exist_ok=True)
-        self.pdf_dir.mkdir(parents=True, exist_ok=True)
+        base_dir = Path(config.scraping_config.directories.base)
+        scrape_dir = base_dir / config.scraping_config.directories.scrape.base
+        self.pdf_dir = scrape_dir / config.scraping_config.directories.scrape.pdfs
+        # Directory creation is handled by WebScraper.setup_directories
         
     async def extract_content(self, url: str, content: str) -> Dict:
         """Extract and download PDFs from the page."""

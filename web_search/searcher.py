@@ -11,6 +11,8 @@ from web_search.components.search_manager import SearchManager
 from web_search.components.bm25 import BM25Scorer
 from utils.logger import logger
 from utils.results_storage import ResultsStorage
+import asyncio
+import aiohttp
 
 class WebSearcher:
     def __init__(self):
@@ -25,12 +27,12 @@ class WebSearcher:
         # Initialize components
         self.search_manager = SearchManager(
             search_engines=self.search_engines,
-            config=config.search_config
+            config_model=config.settings.search  # Changed 'config' to 'config_model'
         )
         
         self.bm25_scorer = BM25Scorer(
-            k1=config.bm25_config.get('k1', 1.2),
-            b=config.bm25_config.get('b', 0.75)
+            k1=config.settings.bm25.k1,
+            b=config.settings.bm25.b
         )
         
         # Initialize results storage with query parameter
@@ -38,78 +40,18 @@ class WebSearcher:
         self.results_file = None  # Initialize results_file
         logger.info("WebSearcher initialized with all components")
 
-    def search(self, query: str) -> List[str]:
+    async def search(self, query: str) -> List[str]:
         """Perform web search and return ranked results."""
         logger.info(f"Starting search for query: {query}")
-        
-        # Initialize ResultsStorage with query
-        self.results_storage = ResultsStorage(query=query, type_='search')
-        
-        # Get raw search results
-        """Perform web search and return ranked results."""
-        logger.info(f"Starting search for query: {query}")
+        from pathlib import Path
+        base_dir = Path(config.settings.directories.base) / "_".join(query.split())
+        self.results_storage = ResultsStorage(base_dir, query)
         
         # Get raw search results
         all_results = self.search_manager.perform_search(query)
         
         if not all_results:
             logger.warning(f"No results found for query: {query}")
-            return []
-
-        # Save results before validation
-        results_file = self.results_storage.save_results(query, all_results)
-        self.results_file = results_file  # Store the file path
-        logger.info(f"Results saved to: {results_file}")
-
-        # Validate URLs
-        valid_results = []
-        for url in all_results:
-            if self.url_validator.validate_url(url):
-                valid_results.append(url)
-
-        # Get content for each URL
-        url_contents = self._get_url_contents(valid_results)
-        
-        # Calculate BM25 scores
-        scores = self.bm25_scorer.score(query, url_contents)
-        
-        # Combine URLs with their scores
-        scored_results = list(zip(valid_results, scores))
-        
-        # Sort by score
-        scored_results.sort(key=lambda x: x[1], reverse=True)
-        
-        # Save results with metadata
-        metadata = {
-            'search_engines': list(self.search_engines.keys()),
-            'max_results': config.search_config.get('max_results', 10),
-            'bm25_config': config.bm25_config
-        }
-        
-        results_file = self.results_storage.save_results(
-            query=query,
-            results=[url for url, _ in scored_results],
-            metadata=metadata
-        )
-        
-        if results_file:
-            logger.info(f"Search results saved to: {results_file}")
-        
-        # Return top results
-        return [url for url, _ in scored_results[:config.search_config.get('max_results', 10)]]
-
-    def _get_url_contents(self, urls: List[str]) -> List[str]:
-        """Get content from URLs. This is a placeholder method that you'll need to implement."""
-        logger.info(f"Getting content for {len(urls)} URLs")
-        # TODO: Implement URL content fetching
-        return ["" for _ in urls]
-
-    def search(self, query: str) -> List[str]:
-        """Perform web search and return ranked results."""
-        # Get raw search results
-        all_results = self.search_manager.perform_search(query)
-        
-        if not all_results:
             return []
 
         # Validate URLs
@@ -119,11 +61,11 @@ class WebSearcher:
                 valid_results.append(url)
                 
                 # If we have enough valid results, break early
-                if len(valid_results) >= config.search_config.get('max_results', 10):
+                if len(valid_results) >= config.settings.search.max_results:
                     break
 
-        # Get content for each URL (you'll need to implement this)
-        url_contents = self._get_url_contents(valid_results)
+        # Get content for each URL
+        url_contents = await self._get_url_contents(valid_results)
         
         # Calculate BM25 scores
         scores = self.bm25_scorer.score(query, url_contents)
@@ -133,21 +75,79 @@ class WebSearcher:
         
         # Sort by score
         scored_results.sort(key=lambda x: x[1], reverse=True)
-        
-        # Return top results
-        return [url for url, _ in scored_results[:config.search_config.get('max_results', 10)]]
 
-    def _get_url_contents(self, urls: List[str]) -> List[str]:
-        """Get content from URLs. This is a placeholder method that you'll need to implement."""
-        # TODO: Implement actual URL content fetching
-        # This could use aiohttp for async requests
-        # For now, returning dummy content
-        return ["dummy content" for _ in urls]
+        metadata = {
+            'search_engines': list(self.search_engines.keys()),
+            'max_results': config.settings.search.max_results,
+            'bm25_config': {
+                'k1': config.settings.bm25.k1,
+                'b': config.settings.bm25.b
+            }
+        }
+        results_file_path = await self.results_storage.save_search_results(
+            query=query,
+            results=[url for url, _ in scored_results],
+            metadata=metadata
+        )
+        if results_file_path:
+            logger.info(f"Search results saved to: {results_file_path}")
+
+        return [url for url, _ in scored_results[:config.settings.search.max_results]]
+
+    async def _fetch_single_url(self, session: aiohttp.ClientSession, url: str) -> str:
+        """Helper to fetch content from a single URL asynchronously."""
+        try:
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+            # Use timeout from config
+            request_timeout = config.settings.url_validation.url_fetch_request_timeout
+            async with session.get(url, headers=headers, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=request_timeout)) as response:
+                response.raise_for_status() # Raise an exception for HTTP errors 4xx/5xx
+                if 'text/html' in response.headers.get('Content-Type', '').lower() or \
+                   'text/plain' in response.headers.get('Content-Type', '').lower():
+                    # Consider using BeautifulSoup here for cleaner text extraction from HTML
+                    return await response.text()
+                else:
+                    logger.warning(f"Skipping non-text content for {url} (Content-Type: {response.headers.get('Content-Type')})")
+                    return ""
+        except aiohttp.ClientError as e:
+            logger.error(f"aiohttp.ClientError fetching {url}: {str(e)}")
+            return ""
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout error fetching {url} after {request_timeout} seconds.")
+            return ""
+        except Exception as e:
+            logger.error(f"Unexpected error fetching {url}: {str(e)}")
+            return ""
+
+    async def _get_url_contents(self, urls: List[str]) -> List[str]:
+        """Get content from URLs asynchronously using aiohttp."""
+        contents = []
+        # Overall timeout for the ClientSession, can be configured
+        session_timeout_total = config.settings.url_validation.url_fetch_session_timeout_total
+        conn_timeout = config.settings.url_validation.url_fetch_connection_timeout
+        
+        timeout = aiohttp.ClientTimeout(total=session_timeout_total, connect=conn_timeout)
+        
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            tasks = [self._fetch_single_url(session, url) for url in urls]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    # Errors are already logged in _fetch_single_url
+                    contents.append("") 
+                else:
+                    contents.append(result)
+        return contents
 
     def get_search_stats(self) -> dict:
         """Get current search configuration and statistics."""
+        # Note: self.max_results and self.fallback_order were not defined on WebSearcher instance.
+        # Assuming these should come from config or SearchManager if they were intended to be dynamic.
+        # For now, directly accessing from config for consistency.
         return {
-            'max_results': self.max_results,
-            'fallback_order': self.fallback_order,
+            'max_results': config.settings.search.max_results,
+            'fallback_order': config.settings.search.fallback_order,
             'search_engines': list(self.search_engines.keys())
         }
+        

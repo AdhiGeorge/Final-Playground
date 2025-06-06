@@ -4,16 +4,31 @@ import aiohttp
 from bs4 import BeautifulSoup
 import logging
 from urllib.parse import urljoin
+import random
 from utils.config import config
 from utils.logger import logger
+import asyncio
 
 class BaseScraper(ABC):
     def __init__(self):
         """Initialize base scraper with configuration."""
-        self.config = config.get('scraping')
-        self.headers = config.get('scraping.headers', {})
-        self.user_agents = config.get('scraping.user_agents', [])
+        self.scraping_config = config.settings.scraping
+        self.headers = self.scraping_config.headers
+        self.user_agents = self.scraping_config.user_agents
         
+    def get_headers(self) -> Dict[str, str]:
+        """Get headers with random user agent"""
+        headers = self.headers.copy()
+        if self.user_agents:
+            headers["User-Agent"] = random.choice(self.user_agents)
+        return headers
+        
+    async def delay_request(self):
+        """Delay between requests based on rate limit config"""
+        delay = self.scraping_config.rate_limit.delay_between_requests
+        if delay > 0:
+            await asyncio.sleep(delay)
+            
     @abstractmethod
     async def extract_content(self, url: str, content: str) -> Dict:
         """Extract content from the page."""
@@ -22,11 +37,10 @@ class BaseScraper(ABC):
     async def get_page_content(self, url: str) -> Optional[str]:
         """Get page content with proper headers and user agent rotation."""
         try:
-            headers = self.headers.copy()
-            headers['User-Agent'] = random.choice(self.user_agents)
+            headers = self.get_headers()
             
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, timeout=self.config['timeout']) as response:
+                async with session.get(url, headers=headers, timeout=self.scraping_config.timeout) as response:
                     if response.status == 200:
                         return await response.text()
                     return None

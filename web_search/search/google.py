@@ -12,8 +12,11 @@ class GoogleSearch:
             raise ValueError("GOOGLE_API_KEY or GOOGLE_CSE_ID not found in environment variables")
 
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, max=10)
+        stop=stop_after_attempt(config.search_config.retry.max_attempts),
+        wait=wait_exponential(
+            multiplier=config.search_config.retry.wait_exponential_multiplier / 1000, # Convert ms to s for tenacity
+            max=config.search_config.retry.wait_exponential_max / 1000 # Convert ms to s for tenacity
+        )
     )
     def search(self, query: str, max_results: int = 10) -> List[str]:
         """Search using Google Custom Search API."""

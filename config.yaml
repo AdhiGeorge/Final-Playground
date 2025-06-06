@@ -5,11 +5,11 @@ search:
     - duckduckgo
     - tavily
     - google
-  timeout: 30
+  timeout: 30 # Default timeout for search requests
   retry:
     max_attempts: 3
-    wait_exponential_multiplier: 1000
-    wait_exponential_max: 10000
+    wait_exponential_multiplier: 1000 # milliseconds
+    wait_exponential_max: 10000 # milliseconds
 
 # URL Validation
 url_validation:
@@ -35,52 +35,42 @@ url_validation:
     - github.com
     - arxiv.org
     - medium.com
+  blocked_extensions: ['.exe', '.zip', '.rar']
+  # Timeout for fetching URL content during validation/BM25 scoring
+  url_fetch_request_timeout: 15 # seconds for individual request
+  url_fetch_session_timeout_total: 60 # seconds for overall aiohttp session
+  url_fetch_connection_timeout: 10 # seconds for connection phase
 
-  # Results Storage
-  results:
-    directory: "Search_Results"
-    file_prefix: "query_results_"
-    timestamp_format: "%Y%m%d_%H%M%S"
-    include_metadata: true
+# Directories Configuration
+directories:
+  base: "Data" # Base directory for all output
+  search:
+    results: "SearchResults" # Subdirectory for search phase results
+  scrape:
+    base: "ScrapedResults"  # Subdirectory for scraping phase results
+    pdfs: "pdfs"
+    images: "images"
+    html: "html"
+    logs: "logs" # For individual scrape metadata JSONs
+  logs: "logs" # For application system logs
 
 # Web Scraping Configuration
 scraping:
-  # Core Settings
   max_concurrent: 5
   max_retries: 3
-  retry_delay: 2
-  timeout: 30
-  
-  # Directories
-  directories:
-    base: "Data"
-    scrape:
-      base: "Scraped_Results"
-      pdfs: "pdfs"
-      images: "images"
-      math: "math"
-      html: "html"
-  
-  # Request Headers
+  retry_delay: 2 # seconds
+  timeout: 30000 # milliseconds for playwright operations (30 seconds)
   headers:
     Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
     Accept-Language: "en-US,en;q=0.5"
     Accept-Encoding: "gzip, deflate, br"
-  
-  # User Agents
   user_agents:
     - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     - "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     - "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0"
-    - "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Safari/605.1.15"
-  
-  # Default URLs
-  default_urls:
-    - "https://huggingface.co/learn/agents-course/en/unit1/what-are-agents"
-    - "https://cloud.google.com/discover/what-are-ai-agents"
-  
-  # Scraping Modes
-  modes:
+  default_urls: # Example URLs if needed for testing
+    - "https://example.com"
+  modes: # Different scraping intensities
     basic:
       scrape_pdfs: false
       scrape_images: false
@@ -93,13 +83,9 @@ scraping:
       scrape_pdfs: true
       scrape_images: true
       scrape_math_symbols: true
-  
-  # Rate Limiting
   rate_limit:
-    requests_per_minute: 60
-    delay_between_requests: 1
-  
-  # Proxy Settings
+    requests_per_minute: 60 # Not directly used by current sleep, but for reference
+    delay_between_requests: 1 # seconds
   proxy:
     enabled: false
     type: "http"
@@ -108,25 +94,16 @@ scraping:
     username: ""
     password: ""
 
-# URL Validation
-url_validation:
-  max_content_size: 10485760  # 10MB
-
 # BM25 Configuration
 bm25:
   k1: 1.2
   b: 0.75
 
-# Logging
+# Logging Configuration
 logging:
   level: INFO
-  file: "logs/system.log"
+  file: "system.log" # Log file name, will be placed in directories.logs
   max_bytes: 10485760  # 10MB
   backup_count: 5
-  
-  # Directory
-  directory: "logs"
-  
-  # Formatters
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
   date_format: "%Y-%m-%d %H:%M:%S"
